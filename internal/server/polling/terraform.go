@@ -18,6 +18,7 @@ import (
 
 	"github.com/flux-iac/tofu-controller/internal/config"
 	bpconfig "github.com/flux-iac/tofu-controller/internal/config"
+	"github.com/flux-iac/tofu-controller/internal/git/provider"
 
 	infrav1 "github.com/flux-iac/tofu-controller/api/v1alpha2"
 )
@@ -82,10 +83,10 @@ func (s *Server) getSource(ctx context.Context, tf *infrav1.Terraform) (*sourcev
 	return obj, nil
 }
 
-func (s *Server) reconcileTerraform(ctx context.Context, originalTF *infrav1.Terraform, originalSource *sourcev1.GitRepository, branch string, prID string, interval time.Duration) error {
+func (s *Server) reconcileTerraform(ctx context.Context, originalTF *infrav1.Terraform, originalSource *sourcev1.GitRepository, pr provider.PullRequest, prID string, interval time.Duration) error {
 	tfName := config.PullRequestObjectName(originalTF.Name, prID)
 	msg := fmt.Sprintf("Terraform object %s in the namespace %s", tfName, originalTF.Namespace)
-	source, err := s.reconcileSource(ctx, originalTF.Name, originalSource, branch, prID, interval)
+	source, err := s.reconcileSource(ctx, originalTF.Name, originalSource, pr, prID, interval)
 	if err != nil {
 		return fmt.Errorf("unable to reconcile Source for %s: %w", msg, err)
 	}
@@ -97,7 +98,7 @@ func (s *Server) reconcileTerraform(ctx context.Context, originalTF *infrav1.Ter
 		},
 	}
 
-	branchLabels := s.createLabels(originalTF.Labels, originalTF.Name, branch, prID)
+	branchLabels := s.createLabels(originalTF.Labels, originalTF.Name, pr.HeadBranch, prID)
 	op, err := controllerutil.CreateOrUpdate(ctx, s.clusterClient, tf, func() error {
 		spec := originalTF.Spec.DeepCopy()
 
@@ -144,7 +145,7 @@ func (s *Server) reconcileTerraform(ctx context.Context, originalTF *infrav1.Ter
 	return nil
 }
 
-func (s *Server) reconcileSource(ctx context.Context, tfName string, originalSource *sourcev1.GitRepository, branch string, prID string, interval time.Duration) (*sourcev1.GitRepository, error) {
+func (s *Server) reconcileSource(ctx context.Context, tfName string, originalSource *sourcev1.GitRepository, pr provider.PullRequest, prID string, interval time.Duration) (*sourcev1.GitRepository, error) {
 	sourceName := config.SourceName(tfName, originalSource.Name, prID)
 	msg := fmt.Sprintf("Source %s in the namespace %s", sourceName, originalSource.Namespace)
 	source := &sourcev1.GitRepository{
@@ -154,17 +155,17 @@ func (s *Server) reconcileSource(ctx context.Context, tfName string, originalSou
 		},
 		Spec: originalSource.Spec,
 	}
-	branchLabels := s.createLabels(originalSource.Labels, originalSource.Name, branch, prID)
+	branchLabels := s.createLabels(originalSource.Labels, originalSource.Name, pr.HeadBranch, prID)
 
 	op, err := controllerutil.CreateOrUpdate(ctx, s.clusterClient, source, func() error {
 		source.SetLabels(branchLabels)
 
 		spec := originalSource.Spec.DeepCopy()
 
-		if spec.Reference != nil {
-			spec.Reference.Branch = branch
-		} else {
-			spec.Reference = &sourcev1.GitRepositoryRef{Branch: branch}
+		spec.Reference = &sourcev1.GitRepositoryRef{Branch: pr.HeadBranch}
+		// Flux cannot resolve abbreviated SHAs (e.g. Bitbucket Cloud returns 12 chars); fall back to the branch tip.
+		if len(pr.HeadSha) == 40 || len(pr.HeadSha) == 64 {
+			spec.Reference.Commit = pr.HeadSha
 		}
 		spec.Interval = metav1.Duration{
 			Duration: interval,

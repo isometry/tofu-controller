@@ -225,7 +225,7 @@ func (s *Server) reconcile(ctx context.Context, original *infrav1.Terraform, sou
 
 		// Reconcile the Terraform objects related to each PR.
 		// If an error occurs, log it and continue with the next PR.
-		if err := s.reconcileTerraform(ctx, original, source, pr.HeadBranch, prId, s.branchPollingInterval); err != nil {
+		if err := s.reconcileTerraform(ctx, original, source, pr, prId, s.branchPollingInterval); err != nil {
 			log.Error(err, "failed to reconcile Terraform object for PR", "PR ID", prId)
 		} else {
 			log.Info("successfully reconciled Terraform object for PR", "PR ID", prId)
