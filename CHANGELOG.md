@@ -2,6 +2,24 @@
 
 All notable changes of this project are documented in this file.
 
+## v0.16.5+patch3
+
+**Release date:** 2026-10-23
+
+Patch release of the [isometry/tofu-controller](https://github.com/isometry/tofu-controller) fork on top of v0.16.5. It also covers the changes of v0.16.5+patch and v0.16.5+patch2.
+
+## What's Changed
+* feat(branch-planner): plan PR file mappings: workspace file mappings (e.g. tfvars Secrets generated from the repository) use the content of the PR, including files added and deleted by the PR, configured with the `infra.weave.works/branch-planner-source-dir` and `infra.weave.works/branch-planner-source-files` Secret annotations
+* feat(branch-planner): update PR comments in place, with one collapsible comment per Terraform object and cluster that names the planned commit, and the new `--cluster-name` flag (`branchPlanner.clusterName` Helm value)
+* fix(branch-planner): only plan PRs targeting the tracked branch ([48f9d77](https://github.com/isometry/tofu-controller/commit/48f9d774da16bb1e83b1ce2421e8499707fd116f))
+* fix(branch-planner): pin PR source ref to head commit ([6c441f0](https://github.com/isometry/tofu-controller/commit/6c441f0a9036072db12e666ee247bed49d3b939e))
+* fix: read branch planner token secret just in time ([ab52f0e](https://github.com/isometry/tofu-controller/commit/ab52f0eee885fe0233ac51b4d886d62a370fe5ef))
+* fix(test): stop the mTLS CA rotations sharing a second in https://github.com/flux-iac/tofu-controller/pull/1891
+* chore(deps): bump the go-minor group across 1 directory with 12 updates in https://github.com/flux-iac/tofu-controller/pull/1875
+* fix: list only open GitLab merge requests in https://github.com/flux-iac/tofu-controller/pull/1865
+* chore(deps): bump the go-patch group across 1 directory with 7 updates in https://github.com/flux-iac/tofu-controller/pull/1871
+* fix(deps): remove libcrypto3 pin in https://github.com/flux-iac/tofu-controller/pull/1874
+
 ## v0.16.5
 
 **Release date:** 2026-08-06
