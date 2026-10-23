@@ -26,3 +26,9 @@ func SourceName(tfName, sourceName, prID string) string {
 
 	return PullRequestObjectName(uniqueName, prID)
 }
+
+func FileMappingSecretName(tfName, secretName, prID string) string {
+	uniqueName := fmt.Sprintf("%s-%s", secretName, GenerateUniqueHash(tfName, secretName, prID))
+
+	return PullRequestObjectName(uniqueName, prID)
+}

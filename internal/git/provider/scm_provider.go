@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -192,7 +191,7 @@ func (p *scmProvider) UpdateCommentOfPullRequest(ctx context.Context, pr PullReq
 		return err
 	}
 
-	comment, _, err := svc.FindComment(ctx, pr.Repository.String(), pr.Number, commentID)
+	_, _, err := svc.FindComment(ctx, pr.Repository.String(), pr.Number, commentID)
 
 	if err != nil {
 		if errors.Is(err, scm.ErrNotFound) {
@@ -200,14 +199,6 @@ func (p *scmProvider) UpdateCommentOfPullRequest(ctx context.Context, pr PullReq
 				Body: string(body),
 			})
 		}
-
-		return err
-	}
-
-	if strings.Contains(comment.Body, "```hcl") {
-		_, _, err := svc.CreateComment(ctx, pr.Repository.String(), pr.Number, &scm.CommentInput{
-			Body: string(body),
-		})
 
 		return err
 	}

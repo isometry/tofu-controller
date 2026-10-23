@@ -26,6 +26,22 @@ type FakeProvider struct {
 		result1 *provider.Comment
 		result2 error
 	}
+	GetFileContentStub        func(context.Context, provider.Repository, string, string) ([]byte, error)
+	getFileContentMutex       sync.RWMutex
+	getFileContentArgsForCall []struct {
+		arg1 context.Context
+		arg2 provider.Repository
+		arg3 string
+		arg4 string
+	}
+	getFileContentReturns struct {
+		result1 []byte
+		result2 error
+	}
+	getFileContentReturnsOnCall map[int]struct {
+		result1 []byte
+		result2 error
+	}
 	GetLastCommentsStub        func(context.Context, provider.PullRequest, time.Time) ([]*provider.Comment, error)
 	getLastCommentsMutex       sync.RWMutex
 	getLastCommentsArgsForCall []struct {
@@ -198,6 +214,73 @@ func (fake *FakeProvider) AddCommentToPullRequestReturnsOnCall(i int, result1 *p
 	}
 	fake.addCommentToPullRequestReturnsOnCall[i] = struct {
 		result1 *provider.Comment
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeProvider) GetFileContent(arg1 context.Context, arg2 provider.Repository, arg3 string, arg4 string) ([]byte, error) {
+	fake.getFileContentMutex.Lock()
+	ret, specificReturn := fake.getFileContentReturnsOnCall[len(fake.getFileContentArgsForCall)]
+	fake.getFileContentArgsForCall = append(fake.getFileContentArgsForCall, struct {
+		arg1 context.Context
+		arg2 provider.Repository
+		arg3 string
+		arg4 string
+	}{arg1, arg2, arg3, arg4})
+	stub := fake.GetFileContentStub
+	fakeReturns := fake.getFileContentReturns
+	fake.recordInvocation("GetFileContent", []interface{}{arg1, arg2, arg3, arg4})
+	fake.getFileContentMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2, arg3, arg4)
+	}
+	if specificReturn {
+		return ret.result1, ret.result2
+	}
+	return fakeReturns.result1, fakeReturns.result2
+}
+
+func (fake *FakeProvider) GetFileContentCallCount() int {
+	fake.getFileContentMutex.RLock()
+	defer fake.getFileContentMutex.RUnlock()
+	return len(fake.getFileContentArgsForCall)
+}
+
+func (fake *FakeProvider) GetFileContentCalls(stub func(context.Context, provider.Repository, string, string) ([]byte, error)) {
+	fake.getFileContentMutex.Lock()
+	defer fake.getFileContentMutex.Unlock()
+	fake.GetFileContentStub = stub
+}
+
+func (fake *FakeProvider) GetFileContentArgsForCall(i int) (context.Context, provider.Repository, string, string) {
+	fake.getFileContentMutex.RLock()
+	defer fake.getFileContentMutex.RUnlock()
+	argsForCall := fake.getFileContentArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4
+}
+
+func (fake *FakeProvider) GetFileContentReturns(result1 []byte, result2 error) {
+	fake.getFileContentMutex.Lock()
+	defer fake.getFileContentMutex.Unlock()
+	fake.GetFileContentStub = nil
+	fake.getFileContentReturns = struct {
+		result1 []byte
+		result2 error
+	}{result1, result2}
+}
+
+func (fake *FakeProvider) GetFileContentReturnsOnCall(i int, result1 []byte, result2 error) {
+	fake.getFileContentMutex.Lock()
+	defer fake.getFileContentMutex.Unlock()
+	fake.GetFileContentStub = nil
+	if fake.getFileContentReturnsOnCall == nil {
+		fake.getFileContentReturnsOnCall = make(map[int]struct {
+			result1 []byte
+			result2 error
+		})
+	}
+	fake.getFileContentReturnsOnCall[i] = struct {
+		result1 []byte
 		result2 error
 	}{result1, result2}
 }

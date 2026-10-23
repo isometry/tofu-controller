@@ -25,6 +25,8 @@ type applicationOptions struct {
 	watchNamespace     string
 
 	noCrossNamespaceRefs bool
+
+	clusterName string
 }
 
 func parseFlags() *applicationOptions {
@@ -46,6 +48,10 @@ func parseFlags() *applicationOptions {
 		"allowed-namespaces",
 		[]string{},
 		"Allowed namespaced. If it's empty, all namespaces are allowed for the planner. If it's not empty, only resources in the defined namespaces are allowed.")
+
+	flag.StringVar(&opts.clusterName,
+		"cluster-name", "",
+		"Name of the cluster shown in pull request comments, to tell apart the comments of branch planners in several clusters.")
 
 	opts.logOptions.BindFlags(flag.CommandLine)
 

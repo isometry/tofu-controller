@@ -5,7 +5,9 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"text/template"
 
@@ -31,6 +33,8 @@ var (
 
 	parsedPlanTemplate  = template.Must(template.New("plan-comment").Parse(planCommentTemplate))
 	parsedErrorTemplate = template.Must(template.New("error-comment").Parse(errorCommentTemplate))
+
+	planSummaryRegexp = regexp.MustCompile(`(?m)^(Plan: .+|No changes\..*)$`)
 )
 
 type Informer struct {
@@ -41,6 +45,7 @@ type Informer struct {
 	gitProvider         provider.Provider
 	providerOptsFn      func(ctx context.Context) ([]provider.ProviderOption, error)
 	gitProviderParserFn provider.URLParserFn
+	clusterName         string
 
 	mux    *sync.RWMutex
 	synced bool
@@ -176,7 +181,7 @@ func (i *Informer) updateHandler(oldObj, newObj any) {
 				return
 			}
 
-			content, err := formatErrorOutput(condition.Message)
+			content, err := formatErrorOutput(i.commentSubject(new), shortRevision(new.Status.LastAttemptedRevision), condition.Message)
 			if err != nil {
 				i.log.Error(err, "failed to format error output")
 				return
@@ -215,7 +220,7 @@ func (i *Informer) updateHandler(oldObj, newObj any) {
 
 	i.log.Info("Updated plan", "pr-id", new.Labels[config.LabelPRIDKey])
 
-	content, err := formatPlanOutput(plan)
+	content, err := formatPlanOutput(i.commentSubject(new), shortRevision(new.Status.LastPlannedRevision), plan)
 	if err != nil {
 		i.log.Error(err, "failed to format plan output")
 		return
@@ -238,33 +243,24 @@ func (i *Informer) addCommentToPullRequest(ctx context.Context, tf *infrav1.Terr
 		i.log.Error(err, "failed converting PR id to integer", "pr-id", tf.Labels[config.LabelPRIDKey], "namespace", tf.Namespace, "name", tf.Name)
 	}
 
-	commentID, err := strconv.Atoi(tf.Annotations[config.AnnotationCommentIDKey])
-	if err != nil {
-		i.log.Error(err, "failed converting comment id to integer", "comment-id", tf.Annotations[config.AnnotationCommentIDKey], "namespace", tf.Namespace, "name", tf.Name)
-		commentID = 0
-	}
-
 	pr := provider.PullRequest{
 		Repository: repo,
 		Number:     prId,
 	}
 
-	// If commentID is 0, it means that the comment has not been created yet.
-	if commentID == 0 {
-		if _, err := gitProvider.AddCommentToPullRequest(ctx, pr, content); err != nil {
-			i.log.Error(err, "failed adding comment to pull request", "pr-id", tf.Labels[config.LabelPRIDKey], "namespace", tf.Namespace, "name", tf.Name)
+	namespace, name := commentTarget(tf)
+	if _, err := provider.UpsertComment(ctx, gitProvider, pr, config.CommentMarker(namespace, name, i.clusterName), content); err != nil {
+		i.log.Error(err, "failed commenting on pull request", "pr-id", tf.Labels[config.LabelPRIDKey], "namespace", tf.Namespace, "name", tf.Name)
+
+		return
+	}
+
+	// The comment is found by its marker, the annotation is only set by
+	// previous versions of the branch planner.
+	if _, ok := tf.Annotations[config.AnnotationCommentIDKey]; ok {
+		if err := i.removeCommentIDAnnotation(ctx, tf); err != nil {
+			i.log.Error(err, "failed removing comment id from object", "pr-id", tf.Labels[config.LabelPRIDKey], "namespace", tf.Namespace, "name", tf.Name)
 		}
-		return
-	}
-
-	if err := gitProvider.UpdateCommentOfPullRequest(ctx, pr, commentID, content); err != nil {
-		i.log.Error(err, "failed updating comment in pull request", "pr-id", tf.Labels[config.LabelPRIDKey], "comment-id", commentID, "namespace", tf.Namespace, "name", tf.Name)
-
-		return
-	}
-
-	if err := i.removeCommentIDAnnotation(ctx, tf, commentID); err != nil {
-		i.log.Error(err, "failed removing comment id from object", "pr-id", tf.Labels[config.LabelPRIDKey], "comment-id", commentID, "namespace", tf.Namespace, "name", tf.Name)
 	}
 }
 
@@ -283,7 +279,7 @@ func (i *Informer) addErrorAnnotation(ctx context.Context, tf *infrav1.Terraform
 	return i.client.Patch(ctx, tf, patch)
 }
 
-func (i *Informer) removeCommentIDAnnotation(ctx context.Context, tf *infrav1.Terraform, commentID int) error {
+func (i *Informer) removeCommentIDAnnotation(ctx context.Context, tf *infrav1.Terraform) error {
 	patch := client.MergeFrom(tf.DeepCopy())
 
 	annotations := tf.GetAnnotations()
@@ -381,8 +377,46 @@ func (i *Informer) getRepo(ctx context.Context, tf *infrav1.Terraform) (provider
 	return gitProvider, repo, nil
 }
 
-func formatPlanOutput(planOutput string) ([]byte, error) {
-	data := struct{ PlanOutput string }{PlanOutput: planOutput}
+// commentTarget returns the original Terraform object of a branch planner
+// object, which its pull request comment refers to.
+func commentTarget(tf *infrav1.Terraform) (string, string) {
+	name := tf.Labels[config.LabelPrimaryResourceKey]
+	if name == "" {
+		name = tf.Name
+	}
+
+	return tf.Namespace, name
+}
+
+func (i *Informer) commentSubject(tf *infrav1.Terraform) string {
+	namespace, name := commentTarget(tf)
+
+	return config.CommentSubject(namespace, name, i.clusterName)
+}
+
+// shortRevision returns the short commit SHA of a source revision such as
+// "refs/heads/main@sha1:<sha>", or an empty string if there is none.
+func shortRevision(revision string) string {
+	_, sha, ok := strings.Cut(revision, ":")
+	if !ok {
+		return ""
+	}
+
+	return sha[:min(len(sha), 7)]
+}
+
+func formatPlanOutput(subject, revision, planOutput string) ([]byte, error) {
+	data := struct {
+		Subject    string
+		Revision   string
+		Summary    string
+		PlanOutput string
+	}{
+		Subject:    subject,
+		Revision:   revision,
+		Summary:    planSummaryRegexp.FindString(planOutput),
+		PlanOutput: planOutput,
+	}
 
 	var buf bytes.Buffer
 	if err := parsedPlanTemplate.Execute(&buf, data); err != nil {
@@ -392,8 +426,16 @@ func formatPlanOutput(planOutput string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func formatErrorOutput(message string) ([]byte, error) {
-	data := struct{ ErrorMessage string }{ErrorMessage: message}
+func formatErrorOutput(subject, revision, message string) ([]byte, error) {
+	data := struct {
+		Subject      string
+		Revision     string
+		ErrorMessage string
+	}{
+		Subject:      subject,
+		Revision:     revision,
+		ErrorMessage: message,
+	}
 
 	var buf bytes.Buffer
 	if err := parsedErrorTemplate.Execute(&buf, data); err != nil {

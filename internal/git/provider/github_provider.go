@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
@@ -136,8 +135,7 @@ func (p *GitHubProvider) GetLastComments(ctx context.Context, pr PullRequest, si
 }
 
 func (p *GitHubProvider) UpdateCommentOfPullRequest(ctx context.Context, pr PullRequest, commentID int, body []byte) error {
-	// tf-controller plan output:
-	comment, _, err := p.client.Issues.FindComment(ctx, pr.Repository.String(), pr.Number, commentID)
+	_, _, err := p.client.Issues.FindComment(ctx, pr.Repository.String(), pr.Number, commentID)
 
 	// if comment not found, scm.ErrNotFound
 	if err != nil {
@@ -150,17 +148,6 @@ func (p *GitHubProvider) UpdateCommentOfPullRequest(ctx context.Context, pr Pull
 		return err
 	}
 
-	// if comment already contains hcl code block
-	if strings.Contains(comment.Body, "```hcl") {
-		// create new comment
-		_, _, err := p.client.Issues.CreateComment(ctx, pr.Repository.String(), pr.Number, &scm.CommentInput{
-			Body: string(body),
-		})
-
-		return err
-	}
-
-	// else update body to the placeholder comment
 	_, _, err = p.client.Issues.EditComment(ctx, pr.Repository.String(), pr.Number, commentID, &scm.CommentInput{
 		Body: string(body),
 	})

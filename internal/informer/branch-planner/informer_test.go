@@ -125,6 +125,9 @@ func TestInformer(t *testing.T) {
 		_, _, body := gitProvider.AddCommentToPullRequestArgsForCall(0)
 		return string(body)
 	}).Should(gom.ContainSubstring("terraform plan output"))
+
+	_, _, body := gitProvider.AddCommentToPullRequestArgsForCall(0)
+	g.Expect(string(body)).To(gom.HavePrefix(config.CommentMarker(ns.Name, "helloworld", "") + "\n#### Plan for `" + ns.Name + "/helloworld`"))
 }
 
 // TestInformerReadsProviderSecretJustInTime verifies that the informer

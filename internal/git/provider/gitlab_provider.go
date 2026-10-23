@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -136,7 +135,7 @@ func (p *GitLabProvider) GetLastComments(ctx context.Context, pr PullRequest, si
 }
 
 func (p *GitLabProvider) UpdateCommentOfPullRequest(ctx context.Context, pr PullRequest, commentID int, body []byte) error {
-	comment, _, err := p.client.PullRequests.FindComment(ctx, pr.Repository.String(), pr.Number, commentID)
+	_, _, err := p.client.PullRequests.FindComment(ctx, pr.Repository.String(), pr.Number, commentID)
 
 	if err != nil {
 		if errors.Is(err, scm.ErrNotFound) {
@@ -144,14 +143,6 @@ func (p *GitLabProvider) UpdateCommentOfPullRequest(ctx context.Context, pr Pull
 				Body: string(body),
 			})
 		}
-
-		return err
-	}
-
-	if strings.Contains(comment.Body, "```hcl") {
-		_, _, err := p.client.PullRequests.CreateComment(ctx, pr.Repository.String(), pr.Number, &scm.CommentInput{
-			Body: string(body),
-		})
 
 		return err
 	}

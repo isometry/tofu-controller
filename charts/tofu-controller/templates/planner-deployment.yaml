@@ -42,6 +42,9 @@ spec:
         - --polling-interval={{ .Values.branchPlanner.pollingInterval }}
         - --allowed-namespaces={{ include "tofu-controller.runner.allowedNamespaces" . | fromJsonArray | join "," }}
         - --allow-cross-namespace-refs={{ .Values.allowCrossNamespaceRefs }}
+        {{- with .Values.branchPlanner.clusterName }}
+        - --cluster-name={{ . }}
+        {{- end }}
         env:
           {{- include "pod-namespace" . | indent 8 }}
         image: "{{ .Values.branchPlanner.image.repository }}:{{ default .Chart.AppVersion .Values.branchPlanner.image.tag }}"

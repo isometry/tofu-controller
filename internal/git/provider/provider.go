@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -25,6 +26,9 @@ func validateHostname(hostname string) error {
 	return nil
 }
 
+// ErrFileNotFound is returned by GetFileContent when the file does not exist.
+var ErrFileNotFound = errors.New("file not found")
+
 type ProviderType string
 
 const (
@@ -46,6 +50,9 @@ type Provider interface {
 	GetLastComments(ctx context.Context, pr PullRequest, since time.Time) ([]*Comment, error)
 	UpdateCommentOfPullRequest(ctx context.Context, pr PullRequest, commentID int, body []byte) error
 	ListPullRequestChanges(ctx context.Context, pr PullRequest) ([]Change, error)
+	// GetFileContent returns the content of the file at path for the given ref.
+	// It returns ErrFileNotFound if the file does not exist at that ref.
+	GetFileContent(ctx context.Context, repo Repository, path, ref string) ([]byte, error)
 
 	SetLogger(logr.Logger) error
 	SetToken(tokenType, token string) error

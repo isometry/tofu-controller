@@ -21,6 +21,21 @@ const (
 	AnnotationCommentIDKey  = "infra.weave.works/comment-id"
 	AnnotationErrorRevision = "infra.weave.works/error-revision"
 
+	// AnnotationFileMappingSourceDir is set on a Secret used by workspace
+	// file mappings to tell the branch planner which repository directory
+	// holds the files of its keys (<dir>/<key>).
+	AnnotationFileMappingSourceDir = "infra.weave.works/branch-planner-source-dir"
+
+	// AnnotationFileMappingSourceFiles is set on a Secret used by workspace
+	// file mappings to list, as a JSON array ordered by precedence (last
+	// wins), the candidate tfvars files of its keys. The branch planner maps
+	// and loads the candidates that exist in the pull request.
+	AnnotationFileMappingSourceFiles = "infra.weave.works/branch-planner-source-files"
+
+	// AnnotationFileMappingRevision is set by the branch planner on the copies
+	// of the file mapping Secrets to know what they have been built from.
+	AnnotationFileMappingRevision = "infra.weave.works/branch-planner-file-mapping-revision"
+
 	// DefaultNamespace will be used if RUNTIME_NAMESPACE is not defined.
 	DefaultNamespace       = "flux-system"
 	DefaultTokenSecretName = "branch-planner-token"

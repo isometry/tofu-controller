@@ -3,6 +3,7 @@ package polling_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -103,8 +104,11 @@ func Test_Server(t *testing.T) {
 		if prtf.Annotations == nil {
 			return fmt.Errorf("resource has no annotations")
 		}
-		if prtf.Annotations[config.AnnotationCommentIDKey] != "2" {
-			return fmt.Errorf("%q is not up to date: %s", config.AnnotationCommentIDKey, prtf.Annotations[config.AnnotationCommentIDKey])
+		if fakeProvider.AddCommentToPullRequestCallCount() == 0 {
+			return fmt.Errorf("no placeholder comment")
+		}
+		if _, _, body := fakeProvider.AddCommentToPullRequestArgsForCall(0); !strings.HasPrefix(string(body), config.CommentMarker(config.DefaultNamespace, "tf1", "")) {
+			return fmt.Errorf("placeholder comment has no marker: %s", body)
 		}
 		if prtf.Annotations[meta.ReconcileRequestAnnotation] == oldReconcileRequestAnnotation {
 			return fmt.Errorf("annotation %q is not up to date: %s", meta.ReconcileRequestAnnotation, prtf.Annotations[meta.ReconcileRequestAnnotation])

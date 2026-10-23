@@ -20,6 +20,14 @@ func WithLogger(log logr.Logger) Option {
 	}
 }
 
+func WithClusterName(name string) Option {
+	return func(s *Server) error {
+		s.clusterName = name
+
+		return nil
+	}
+}
+
 func WithClusterClient(clusterClient client.Client) Option {
 	return func(s *Server) error {
 		s.clusterClient = clusterClient

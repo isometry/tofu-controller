@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -35,6 +34,7 @@ type Server struct {
 	allowedNamespaces     []string
 	noCrossNamespaceRefs  bool
 	gitProviderParserFn   provider.URLParserFn
+	clusterName           string
 }
 
 func New(options ...Option) (*Server, error) {
@@ -277,7 +277,7 @@ func (s *Server) reconcile(ctx context.Context, original *infrav1.Terraform, sou
 
 		// Reconcile the Terraform objects related to each PR.
 		// If an error occurs, log it and continue with the next PR.
-		if err := s.reconcileTerraform(ctx, original, source, pr, prId, s.branchPollingInterval); err != nil {
+		if err := s.reconcileTerraform(ctx, original, source, pr, prId, s.branchPollingInterval, gitProvider); err != nil {
 			log.Error(err, "failed to reconcile Terraform object for PR", "PR ID", prId)
 		} else {
 			log.Info("successfully reconciled Terraform object for PR", "PR ID", prId)
@@ -333,14 +333,15 @@ func (s *Server) reconcile(ctx context.Context, original *infrav1.Terraform, sou
 			if comment != nil && strings.Contains(comment.Body, "!replan") {
 				log.Info("last comment contains '!replan', triggering replan action...")
 
-				placeholderComment, err := gitProvider.AddCommentToPullRequest(ctx, pr, []byte("Planning in progress..."))
-				if err != nil {
-					log.Error(err, "failed to add comment to pull request", "PR ID", prId)
+				marker := bpconfig.CommentMarker(original.Namespace, original.Name, s.clusterName)
+				placeholder := fmt.Sprintf("Planning in progress for %s...", bpconfig.CommentSubject(original.Namespace, original.Name, s.clusterName))
+				if _, err := provider.UpsertComment(ctx, gitProvider, pr, marker, []byte(placeholder)); err != nil {
+					log.Error(err, "failed to comment on pull request", "PR ID", prId)
 				} else {
-					log.Info("successfully added comment to pull request", "PR ID", prId)
+					log.Info("successfully commented on pull request", "PR ID", prId)
 				}
 
-				if err = s.replanTerraform(ctx, tfPlannerObject, placeholderComment.ID); err != nil {
+				if err = s.replanTerraform(ctx, tfPlannerObject); err != nil {
 					log.Error(err, "failed to trigger replan")
 				} else {
 					log.Info("successfully triggered replan", "PR ID", prId)
@@ -357,7 +358,7 @@ func (s *Server) reconcile(ctx context.Context, original *infrav1.Terraform, sou
 	return nil
 }
 
-func (s *Server) replanTerraform(ctx context.Context, object *infrav1.Terraform, commentId int) error {
+func (s *Server) replanTerraform(ctx context.Context, object *infrav1.Terraform) error {
 	terraform := &infrav1.Terraform{}
 	// TODO use better namespaced name
 	if err := s.clusterClient.Get(ctx, types.NamespacedName{Name: object.Name, Namespace: object.Namespace}, terraform); err != nil {
@@ -386,16 +387,12 @@ func (s *Server) replanTerraform(ctx context.Context, object *infrav1.Terraform,
 	}
 
 	// trigger a new reconcile
-	if ann := terraform.GetAnnotations(); ann == nil {
-		terraform.SetAnnotations(map[string]string{
-			meta.ReconcileRequestAnnotation: time.Now().Format(time.RFC3339Nano),
-			bpconfig.AnnotationCommentIDKey: strconv.Itoa(commentId),
-		})
-	} else {
-		ann[meta.ReconcileRequestAnnotation] = time.Now().Format(time.RFC3339Nano)
-		ann[bpconfig.AnnotationCommentIDKey] = strconv.Itoa(commentId)
-		terraform.SetAnnotations(ann)
+	ann := terraform.GetAnnotations()
+	if ann == nil {
+		ann = map[string]string{}
 	}
+	ann[meta.ReconcileRequestAnnotation] = time.Now().Format(time.RFC3339Nano)
+	terraform.SetAnnotations(ann)
 
 	return s.clusterClient.Patch(ctx, terraform, patch)
 }

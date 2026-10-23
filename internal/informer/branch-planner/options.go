@@ -50,6 +50,14 @@ func WithCustomProviderURLParserFn(fn provider.URLParserFn) Option {
 	}
 }
 
+func WithClusterName(name string) Option {
+	return func(i *Informer) error {
+		i.clusterName = name
+
+		return nil
+	}
+}
+
 func WithSharedInformer(informer cache.SharedIndexInformer) Option {
 	return func(i *Informer) error {
 		i.sharedInformer = informer

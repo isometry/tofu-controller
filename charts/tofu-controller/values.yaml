@@ -203,6 +203,9 @@ branchPlanner:
   pollingInterval: 30s
   # Interval value to use for Source objects for branch planner Terraform objects.
   sourceInterval: 30s
+  # Name of the cluster shown in pull request comments, to tell apart the
+  # comments of branch planners running in several clusters.
+  clusterName: ""
   # Pod-level security context
   podSecurityContext:
     fsGroup: 1337

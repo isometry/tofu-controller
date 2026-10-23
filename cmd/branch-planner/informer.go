@@ -37,6 +37,7 @@ func startInformer(ctx context.Context, log logr.Logger, dynamicClient *dynamic.
 			return getProviderOpts(ctx, clusterClient, opts.pollingConfigMap)
 		}),
 		planner.WithSharedInformer(sharedInformer),
+		planner.WithClusterName(opts.clusterName),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create informer: %w", err)

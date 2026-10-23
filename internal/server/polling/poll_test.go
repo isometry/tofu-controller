@@ -10,7 +10,9 @@ import (
 
 	"github.com/flux-iac/tofu-controller/internal/git/provider/providerfakes"
 
+	"github.com/fluxcd/pkg/apis/meta"
 	"github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -447,4 +449,432 @@ func Test_filterPullRequestsByBaseBranch(t *testing.T) {
 			g.Expect(server.filterPullRequestsByBaseBranch(tf, source, prs)).To(gomega.ConsistOf(tt.want))
 		})
 	}
+}
+
+// This checks that the Secrets of workspace file mappings are copied for each
+// pull request with the content of the mapped files in the pull request, that
+// a replan is triggered when the content changes after the head commit was
+// planned, and that the copies are deleted when the pull request is closed.
+func Test_poll_reconcile_file_mappings(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ns := newNamespace(t, g)
+	ctx := t.Context()
+
+	source := &sourcev1.GitRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "original-source",
+			Namespace: ns.Name,
+		},
+		Spec: sourcev1.GitRepositorySpec{
+			URL: "https://github.com/tf-controller/helloworld",
+			Reference: &sourcev1.GitRepositoryRef{
+				Branch: "main",
+			},
+		},
+	}
+	expectToSucceed(t, g, k8sClient.Create(ctx, source))
+
+	tfvars := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "tfvars",
+			Namespace: ns.Name,
+		},
+		Data: map[string][]byte{
+			"default.tfvars": []byte(`name = "main"`),
+			"only-in-secret": []byte(`secret = "main"`),
+			"unmapped":       []byte(`unmapped = "main"`),
+		},
+	}
+	expectToSucceed(t, g, k8sClient.Create(ctx, tfvars))
+
+	original := &infrav1.Terraform{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "original",
+			Namespace: ns.Name,
+		},
+		Spec: infrav1.TerraformSpec{
+			Path: "./roots/base/",
+			SourceRef: infrav1.CrossNamespaceSourceReference{
+				Name: source.Name,
+				Kind: "GitRepository",
+			},
+			FileMappings: []infrav1.FileMapping{
+				{
+					Location:  "workspace",
+					Path:      "default.tfvars",
+					SecretRef: meta.SecretKeyReference{Name: tfvars.Name, Key: "default.tfvars"},
+				},
+				{
+					Location:  "workspace",
+					Path:      "only-in-secret.tfvars",
+					SecretRef: meta.SecretKeyReference{Name: tfvars.Name, Key: "only-in-secret"},
+				},
+			},
+		},
+	}
+	expectToSucceed(t, g, k8sClient.Create(ctx, original))
+
+	prs := []provider.PullRequest{
+		{
+			Repository: provider.Repository{Org: "fake-org", Name: "fake-name"},
+			Number:     1,
+			BaseBranch: "main",
+			HeadBranch: "test-branch-1",
+			HeadSha:    "0123456789abcdef",
+			BaseSha:    "fedcba9876543210",
+		},
+	}
+
+	prContent := `name = "pr"`
+	gitProvider := &providerfakes.FakeProvider{}
+	gitProvider.GetFileContentStub = func(_ context.Context, _ provider.Repository, path, ref string) ([]byte, error) {
+		if ref == prs[0].HeadSha && path == "roots/base/default.tfvars" {
+			return []byte(prContent), nil
+		}
+		return nil, provider.ErrFileNotFound
+	}
+
+	server, err := New(WithClusterClient(k8sClient))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	expectToSucceed(t, g, server.reconcile(ctx, original, source, prs, gitProvider))
+
+	secretName := config.FileMappingSecretName(original.Name, tfvars.Name, "1")
+	secret := &corev1.Secret{}
+	expectToSucceed(t, g, k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: secretName}, secret))
+	expectToEqual(t, g, string(secret.Data["default.tfvars"]), `name = "pr"`)
+	expectToEqual(t, g, string(secret.Data["only-in-secret"]), `secret = "main"`)
+	expectToEqual(t, g, string(secret.Data["unmapped"]), `unmapped = "main"`)
+	expectToEqual(t, g, secret.Labels[bpconfig.LabelPrimaryResourceKey], original.Name)
+	expectToEqual(t, g, secret.Labels[bpconfig.LabelPRIDKey], "1")
+
+	branchTF := &infrav1.Terraform{}
+	expectToSucceed(t, g, k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: config.PullRequestObjectName(original.Name, "1")}, branchTF))
+	expectToEqual(t, g, branchTF.Spec.FileMappings[0].SecretRef.Name, secretName)
+	expectToEqual(t, g, branchTF.Spec.FileMappings[1].SecretRef.Name, secretName)
+
+	// Nothing changed: the files are not fetched again, and there is no replan.
+	branchTF.Status.LastPlannedRevision = "test-branch-1@sha1:" + prs[0].HeadSha
+	expectToSucceed(t, g, k8sClient.Status().Update(ctx, branchTF))
+	calls := gitProvider.GetFileContentCallCount()
+
+	expectToSucceed(t, g, server.reconcile(ctx, original, source, prs, gitProvider))
+
+	expectToEqual(t, g, gitProvider.GetFileContentCallCount(), calls)
+	expectToSucceed(t, g, k8sClient.Get(ctx, client.ObjectKeyFromObject(branchTF), branchTF))
+	g.Expect(branchTF.Annotations).NotTo(gomega.HaveKey(meta.ReconcileRequestAnnotation))
+
+	// A new commit is planned before the Secret is updated.
+	prs[0].HeadSha = "1123456789abcdef"
+	prContent = `name = "pr-updated"`
+	branchTF.Status.LastPlannedRevision = "test-branch-1@sha1:" + prs[0].HeadSha
+	expectToSucceed(t, g, k8sClient.Status().Update(ctx, branchTF))
+
+	expectToSucceed(t, g, server.reconcile(ctx, original, source, prs, gitProvider))
+
+	expectToSucceed(t, g, k8sClient.Get(ctx, client.ObjectKeyFromObject(secret), secret))
+	expectToEqual(t, g, string(secret.Data["default.tfvars"]), `name = "pr-updated"`)
+
+	expectToSucceed(t, g, k8sClient.Get(ctx, client.ObjectKeyFromObject(branchTF), branchTF))
+	expectToEqual(t, g, branchTF.Status.LastPlannedRevision, "")
+	g.Expect(branchTF.Annotations).To(gomega.HaveKey(meta.ReconcileRequestAnnotation))
+	g.Expect(branchTF.Annotations).NotTo(gomega.HaveKey(bpconfig.AnnotationCommentIDKey))
+
+	// Closing the pull request deletes the copy, but not the original.
+	expectToSucceed(t, g, server.reconcile(ctx, original, source, nil, gitProvider))
+
+	var secretList corev1.SecretList
+	expectToSucceed(t, g, k8sClient.List(ctx, &secretList, client.InNamespace(ns.Name)))
+	expectToEqual(t, g, len(secretList.Items), 1, "secret list")
+	expectToEqual(t, g, secretList.Items[0].Name, tfvars.Name)
+
+	t.Cleanup(func() { expectToSucceed(t, g, k8sClient.Delete(context.Background(), ns)) })
+}
+
+// This checks that the files of a Secret annotated with a source directory are
+// looked up in that directory, and that the files deleted by the pull request
+// are dropped from the file mappings and the tfvars files.
+func Test_poll_reconcile_file_mappings_source_dir(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ns := newNamespace(t, g)
+	ctx := t.Context()
+
+	source := &sourcev1.GitRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "original-source",
+			Namespace: ns.Name,
+		},
+		Spec: sourcev1.GitRepositorySpec{
+			URL: "https://github.com/tf-controller/helloworld",
+			Reference: &sourcev1.GitRepositoryRef{
+				Branch: "main",
+			},
+		},
+	}
+	expectToSucceed(t, g, k8sClient.Create(ctx, source))
+
+	tfvars := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "tfvars",
+			Namespace: ns.Name,
+			Annotations: map[string]string{
+				bpconfig.AnnotationFileMappingSourceDir: "charts/vpc/tfvars",
+			},
+		},
+		Data: map[string][]byte{
+			"default.tfvars": []byte(`name = "main"`),
+			"mtp.tfvars":     []byte(`mtp = "main"`),
+		},
+	}
+	expectToSucceed(t, g, k8sClient.Create(ctx, tfvars))
+
+	mapping := func(key string) infrav1.FileMapping {
+		return infrav1.FileMapping{
+			Location:  "workspace",
+			Path:      key,
+			SecretRef: meta.SecretKeyReference{Name: tfvars.Name, Key: key},
+		}
+	}
+
+	original := &infrav1.Terraform{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "original",
+			Namespace: ns.Name,
+		},
+		Spec: infrav1.TerraformSpec{
+			Path: "./roots/base/",
+			SourceRef: infrav1.CrossNamespaceSourceReference{
+				Name: source.Name,
+				Kind: "GitRepository",
+			},
+			FileMappings: []infrav1.FileMapping{mapping("default.tfvars"), mapping("mtp.tfvars")},
+			TfVarsFiles:  []string{"roots/base/default.tfvars", "roots/base/mtp.tfvars"},
+		},
+	}
+	expectToSucceed(t, g, k8sClient.Create(ctx, original))
+
+	prs := []provider.PullRequest{
+		{
+			Repository: provider.Repository{Org: "fake-org", Name: "fake-name"},
+			Number:     1,
+			BaseBranch: "main",
+			HeadBranch: "test-branch-1",
+			HeadSha:    "0123456789abcdef",
+			BaseSha:    "fedcba9876543210",
+		},
+	}
+
+	// default.tfvars is changed and mtp.tfvars is deleted by the pull request.
+	files := map[string]map[string]string{
+		prs[0].HeadSha: {"charts/vpc/tfvars/default.tfvars": `name = "pr"`},
+		prs[0].BaseSha: {"charts/vpc/tfvars/default.tfvars": `name = "main"`, "charts/vpc/tfvars/mtp.tfvars": `mtp = "main"`},
+	}
+	gitProvider := &providerfakes.FakeProvider{}
+	gitProvider.GetFileContentStub = func(_ context.Context, _ provider.Repository, path, ref string) ([]byte, error) {
+		if content, ok := files[ref][path]; ok {
+			return []byte(content), nil
+		}
+		return nil, provider.ErrFileNotFound
+	}
+
+	server, err := New(WithClusterClient(k8sClient))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	expectToSucceed(t, g, server.reconcile(ctx, original, source, prs, gitProvider))
+
+	secretName := config.FileMappingSecretName(original.Name, tfvars.Name, "1")
+	secret := &corev1.Secret{}
+	expectToSucceed(t, g, k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: secretName}, secret))
+	expectToEqual(t, g, string(secret.Data["default.tfvars"]), `name = "pr"`)
+	g.Expect(secret.Data).NotTo(gomega.HaveKey("mtp.tfvars"))
+
+	branchTF := &infrav1.Terraform{}
+	expectToSucceed(t, g, k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: config.PullRequestObjectName(original.Name, "1")}, branchTF))
+	expectToEqual(t, g, len(branchTF.Spec.FileMappings), 1)
+	expectToEqual(t, g, branchTF.Spec.FileMappings[0].SecretRef, meta.SecretKeyReference{Name: secretName, Key: "default.tfvars"})
+	expectToEqual(t, g, branchTF.Spec.TfVarsFiles, []string{"roots/base/default.tfvars"})
+
+	t.Cleanup(func() { expectToSucceed(t, g, k8sClient.Delete(context.Background(), ns)) })
+}
+
+// This checks that the candidate files of a Secret are mapped and loaded as
+// tfvars files when they exist in the pull request, in the candidates order,
+// so files added and deleted by the pull request are taken into account.
+func Test_poll_reconcile_file_mappings_source_files(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ns := newNamespace(t, g)
+	ctx := t.Context()
+
+	source := &sourcev1.GitRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "original-source",
+			Namespace: ns.Name,
+		},
+		Spec: sourcev1.GitRepositorySpec{
+			URL: "https://github.com/tf-controller/helloworld",
+			Reference: &sourcev1.GitRepositoryRef{
+				Branch: "main",
+			},
+		},
+	}
+	expectToSucceed(t, g, k8sClient.Create(ctx, source))
+
+	tfvars := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "tfvars",
+			Namespace: ns.Name,
+			Annotations: map[string]string{
+				bpconfig.AnnotationFileMappingSourceDir:   "charts/vpc/tfvars",
+				bpconfig.AnnotationFileMappingSourceFiles: `["default.tfvars","mtp.tfvars","mtp.us-east-1.tfvars"]`,
+			},
+		},
+		Data: map[string][]byte{
+			"default.tfvars": []byte(`name = "main"`),
+			"mtp.tfvars":     []byte(`mtp = "main"`),
+		},
+	}
+	expectToSucceed(t, g, k8sClient.Create(ctx, tfvars))
+
+	mapping := func(secretName, key string) infrav1.FileMapping {
+		return infrav1.FileMapping{
+			Location:  "workspace",
+			Path:      key,
+			SecretRef: meta.SecretKeyReference{Name: secretName, Key: key},
+		}
+	}
+
+	original := &infrav1.Terraform{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "original",
+			Namespace: ns.Name,
+		},
+		Spec: infrav1.TerraformSpec{
+			Path: "./roots/base/",
+			SourceRef: infrav1.CrossNamespaceSourceReference{
+				Name: source.Name,
+				Kind: "GitRepository",
+			},
+			FileMappings: []infrav1.FileMapping{
+				mapping(tfvars.Name, "default.tfvars"),
+				mapping(tfvars.Name, "mtp.tfvars"),
+				{Location: "home", Path: ".tofurc", SecretRef: meta.SecretKeyReference{Name: "tofurc", Key: "tofurc"}},
+			},
+			TfVarsFiles: []string{"roots/base/default.tfvars", "roots/base/mtp.tfvars", "extra.tfvars"},
+		},
+	}
+	expectToSucceed(t, g, k8sClient.Create(ctx, original))
+
+	prs := []provider.PullRequest{
+		{
+			Repository: provider.Repository{Org: "fake-org", Name: "fake-name"},
+			Number:     1,
+			BaseBranch: "main",
+			HeadBranch: "test-branch-1",
+			HeadSha:    "0123456789abcdef",
+			BaseSha:    "fedcba9876543210",
+		},
+	}
+
+	// The pull request changes default.tfvars, deletes mtp.tfvars and adds
+	// mtp.us-east-1.tfvars.
+	gitProvider := &providerfakes.FakeProvider{}
+	gitProvider.GetFileContentStub = func(_ context.Context, _ provider.Repository, path, ref string) ([]byte, error) {
+		expectToEqual(t, g, ref, prs[0].HeadSha)
+		switch path {
+		case "charts/vpc/tfvars/default.tfvars":
+			return []byte(`name = "pr"`), nil
+		case "charts/vpc/tfvars/mtp.us-east-1.tfvars":
+			return []byte(`region = "us-east-1"`), nil
+		}
+		return nil, provider.ErrFileNotFound
+	}
+
+	server, err := New(WithClusterClient(k8sClient))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	expectToSucceed(t, g, server.reconcile(ctx, original, source, prs, gitProvider))
+
+	secretName := config.FileMappingSecretName(original.Name, tfvars.Name, "1")
+	secret := &corev1.Secret{}
+	expectToSucceed(t, g, k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: secretName}, secret))
+	expectToEqual(t, g, len(secret.Data), 2)
+	expectToEqual(t, g, string(secret.Data["default.tfvars"]), `name = "pr"`)
+	expectToEqual(t, g, string(secret.Data["mtp.us-east-1.tfvars"]), `region = "us-east-1"`)
+
+	branchTF := &infrav1.Terraform{}
+	expectToSucceed(t, g, k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: config.PullRequestObjectName(original.Name, "1")}, branchTF))
+	expectToEqual(t, g, branchTF.Spec.FileMappings, []infrav1.FileMapping{
+		mapping(secretName, "default.tfvars"),
+		mapping(secretName, "mtp.us-east-1.tfvars"),
+		original.Spec.FileMappings[2],
+	})
+	expectToEqual(t, g, branchTF.Spec.TfVarsFiles, []string{"roots/base/default.tfvars", "roots/base/mtp.us-east-1.tfvars", "extra.tfvars"})
+
+	t.Cleanup(func() { expectToSucceed(t, g, k8sClient.Delete(context.Background(), ns)) })
+}
+
+// This checks that reconciling an unchanged pull request does not update its
+// Terraform object, which would trigger a replan on every poll.
+func Test_poll_reconcile_unchanged(t *testing.T) {
+	g := gomega.NewWithT(t)
+	ns := newNamespace(t, g)
+	ctx := t.Context()
+
+	source := &sourcev1.GitRepository{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "original-source",
+			Namespace: ns.Name,
+		},
+		Spec: sourcev1.GitRepositorySpec{
+			URL: "https://github.com/tf-controller/helloworld",
+			Reference: &sourcev1.GitRepositoryRef{
+				Branch: "main",
+			},
+		},
+	}
+	expectToSucceed(t, g, k8sClient.Create(ctx, source))
+
+	original := &infrav1.Terraform{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "original",
+			Namespace: ns.Name,
+		},
+		Spec: infrav1.TerraformSpec{
+			SourceRef: infrav1.CrossNamespaceSourceReference{
+				Name: source.Name,
+				Kind: "GitRepository",
+			},
+		},
+	}
+	expectToSucceed(t, g, k8sClient.Create(ctx, original))
+	expectToSucceed(t, g, k8sClient.Get(ctx, client.ObjectKeyFromObject(original), original))
+
+	prs := []provider.PullRequest{
+		{
+			Repository: provider.Repository{Org: "fake-org", Name: "fake-name"},
+			Number:     1,
+			BaseBranch: "main",
+			HeadBranch: "test-branch-1",
+			HeadSha:    "0123456789abcdef",
+		},
+	}
+
+	server, err := New(WithClusterClient(k8sClient))
+	g.Expect(err).NotTo(gomega.HaveOccurred())
+
+	expectToSucceed(t, g, server.reconcile(ctx, original, source, prs, &providerfakes.FakeProvider{}))
+
+	branchTF := &infrav1.Terraform{}
+	expectToSucceed(t, g, k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: config.PullRequestObjectName(original.Name, "1")}, branchTF))
+	branchTF.Status.LastPlannedRevision = "test-branch-1@sha1:" + prs[0].HeadSha
+	expectToSucceed(t, g, k8sClient.Status().Update(ctx, branchTF))
+	generation := branchTF.Generation
+
+	expectToSucceed(t, g, server.reconcile(ctx, original, source, prs, &providerfakes.FakeProvider{}))
+
+	expectToSucceed(t, g, k8sClient.Get(ctx, client.ObjectKeyFromObject(branchTF), branchTF))
+	expectToEqual(t, g, branchTF.Generation, generation)
+	g.Expect(branchTF.Annotations).NotTo(gomega.HaveKey(meta.ReconcileRequestAnnotation))
+
+	t.Cleanup(func() { expectToSucceed(t, g, k8sClient.Delete(context.Background(), ns)) })
 }
